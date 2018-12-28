@@ -1,1 +1,146 @@
+!pip install psycopg2
+from sqlalchemy import create_engine
+# default setup: ('postgresql://postgres:pass@localhost:5432/postgres')
 
+# !N.B. Please enter credentials:
+engine = create_engine('postgresql://username:password@host:port/database')
+# default setup: ('postgresql://postgres:pass@localhost:5432/postgres')
+import psycopg2
+try:
+    # !N.B. Please enter credentials:
+    conn = psycopg2.connect("dbname = 'postgres' user = 'username' host = 'localhost' password = 'pass' port = '5432'")
+except:
+    print ("Database connection unsuccessful")
+    import pandas as pd
+bond_description = pd.read_excel('bond_description.xlsx', sheet_name = 'bond_discription')
+base_prices1 = pd.read_excel('base_prices.xlsx', sheet_name = 'base1')
+base_prices2 = pd.read_excel('base_prices.xlsx', sheet_name = 'base2')
+bond_description_fields = pd.read_excel('bond_description.xlsx', sheet_name = 'bond_filds')
+bond_description_instrs = pd.read_excel('bond_description.xlsx', sheet_name = 'instrs')
+base_prices_fields = pd.read_excel('base_prices.xlsx', sheet_name = 'fields')
+base_prices_instrs = pd.read_excel('base_prices.xlsx', sheet_name = 'instrs')
+base_prices = pd.concat([base_prices1, base_prices2])
+bond_description.columns = [c.lower() for c in bond_description.columns]
+base_prices.columns = [c.lower() for c in base_prices.columns]
+bond_description_fields.columns = [c.lower() for c in bond_description_fields.columns]
+bond_description_instrs.columns = [c.lower() for c in bond_description_instrs.columns]
+base_prices_fields.columns = [c.lower() for c in base_prices_fields.columns]
+base_prices_instrs.columns = [c.lower() for c in base_prices_instrs.columns]
+bond_description.to_sql("bond_description", engine)
+base_prices.to_sql("base_prices", engine)
+bond_description_fields.to_sql("bond_description_fields", engine)
+bond_description_instrs.to_sql("bond_description_instrs", engine)
+base_prices_fields.to_sql("base_prices_fields", engine)
+base_prices_instrs.to_sql("base_prices_instrs", engine)
+bond_description = pd.read_sql_query("SELECT * FROM bond_description", conn)
+columns_to_drop_list = []
+columns_to_keep_list = []
+
+# Create table with columns to-be-dropped
+cursor = conn.cursor()
+cursor.execute("""DROP TABLE IF EXISTS index_table_drop;
+                    create table index_table_drop as select index, ISINCode from bond_description""")
+conn.commit()
+
+# Create table with columns to-be-kept
+cursor = conn.cursor()
+cursor.execute("""DROP TABLE IF EXISTS index_table_keep;
+                    create table index_table_keep as select index, ISINCode from bond_description""")
+conn.commit()
+
+# Fill the tables through loop by columns (as needed in task)
+for i in range(len(bond_description.columns)):
+    
+    # determine the share of filled values in column (to_count)
+    sql = """select (cast(count("{0}") as decimal) / count(*)) as to_count from bond_description"""
+    sql = sql.format(bond_description.columns[i])
+    temp_table = pd.read_sql_query(sql, conn)
+    
+    # if the column is filled more than 10%:
+    if temp_table.iloc[0]['to_count'] > 0.1 and bond_description.columns[i] != 'index' and bond_description.columns[i] != 'isincode':
+        
+        # record the column in a separate list of columns to-be-kept
+        columns_to_keep_list.append(bond_description.columns[i])
+        
+        # add the column to a the table with columns to-be-kept
+        sql = """DROP TABLE IF EXISTS index_table_temp;
+                    create table index_table_temp as 
+                        select t1.*, 
+                                t2."{0}"
+                        from index_table_keep as t1
+                        left join bond_description as t2 
+                            on t1.index = t2.index
+                        ;
+                    DROP TABLE IF EXISTS index_table_keep;
+                    create table index_table_keep as select * from index_table_temp;
+                    """
+        sql = sql.format(bond_description.columns[i])
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        conn.commit()
+       
+    
+    # if the column is filled less than 10%:
+    elif temp_table.iloc[0]['to_count'] < 0.1 and bond_description.columns[i] != 'index' and bond_description.columns[i] != 'isincode':
+        
+        # record the column in a separate list of columns to-be-dropped
+        columns_to_drop_list.append(bond_description.columns[i])
+        
+        # add the column to a the table with columns to-be-dropped
+        sql = """DROP TABLE IF EXISTS index_table_temp;
+                    create table index_table_temp as 
+                        select t1.*, 
+                                t2."{0}" 
+                        from index_table_drop as t1
+                        left join bond_description as t2 
+                            on t1.index = t2.index
+                        ;
+                    DROP TABLE IF EXISTS index_table_drop;
+                    create table index_table_drop as select * from index_table_temp;
+                    """
+        sql = sql.format(bond_description.columns[i])
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        conn.commit()
+
+        
+# create the final table with columns to-be-dropped to be cleansed from all-NA values:
+sql = """DROP TABLE IF EXISTS index_table_to_drop_isins;
+            create table index_table_to_drop_isins as
+                SELECT * 
+                FROM index_table_drop
+            ;
+        """
+cursor = conn.cursor()
+cursor.execute(sql)
+conn.commit()
+
+
+# create the table with indices of all-NA values:
+for i in range(len(columns_to_drop_list)):
+    sql = """DROP TABLE IF EXISTS index_table_temp_isins;
+            create table index_table_temp_isins as
+                SELECT * 
+                FROM index_table_to_drop_isins 
+                where {0} is NULL
+            ;
+            DROP TABLE IF EXISTS index_table_to_drop_isins;
+            create table index_table_to_drop_isins as select * from index_table_temp_isins;
+            """
+    sql = sql.format(columns_to_drop_list[i])
+    cursor = conn.cursor()
+    cursor.execute(sql)
+    conn.commit()
+    
+
+# create the final table with columns to-be-dropped cleansed from all-NA values:
+sql = """DROP TABLE IF EXISTS index_table_drop_clean;
+            create table index_table_drop_clean as
+                SELECT * 
+                FROM index_table_drop
+                where index not in (select index from index_table_to_drop_isins)
+            ;
+        """
+cursor = conn.cursor()
+cursor.execute(sql)
+conn.commit()
